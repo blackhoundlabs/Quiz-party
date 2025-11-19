@@ -1,0 +1,5 @@
+{
+  "name": "Neural Quiz Party",
+  "description": "A multiplayer trivia party game powered by Gemini AI. One device acts as the Host (TV/PC), while players join using their phones as controllers.",
+  "requestFramePermissions": []
+}
