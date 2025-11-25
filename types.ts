@@ -16,6 +16,7 @@ export enum MessageType {
   SUBMIT_ANSWER = 'SUBMIT_ANSWER',
   PLAYER_JOINED = 'PLAYER_JOINED',
   REQUEST_STATE = 'REQUEST_STATE',
+  REQUEST_NEXT_STEP = 'REQUEST_NEXT_STEP',
 }
 
 export const CHANNEL_NAME = 'neural_quiz_party_v1';
@@ -45,6 +46,7 @@ export interface GameState {
   currentLevel: number;
   totalLevels: number;
   currentQuestionIndex: number;
+  totalQuestionsInLevel: number; // Added to help client know when level ends
   currentQuestion: Question | null;
   availableCategories: string[];
   timeRemaining: number;

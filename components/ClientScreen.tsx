@@ -87,6 +87,14 @@ export const ClientScreen: React.FC = () => {
     });
   };
 
+  const sendNextStep = () => {
+      channelRef.current?.postMessage({
+          type: MessageType.REQUEST_NEXT_STEP,
+          payload: {},
+          senderId: playerId
+      });
+  };
+
   if (!connected) {
     return (
       <div className="min-h-screen bg-game-dark p-6 flex flex-col items-center justify-center text-white">
@@ -176,48 +184,88 @@ export const ClientScreen: React.FC = () => {
       )
   }
 
-  if (gameState.phase === GamePhase.QUESTION) {
+  // Merged Question and Reveal logic for easier button rendering
+  if (gameState.phase === GamePhase.QUESTION || gameState.phase === GamePhase.ANSWERS_REVEAL) {
+      const isQuestionPhase = gameState.phase === GamePhase.QUESTION;
       const hasAnswered = myPlayer?.currentAnswer !== undefined;
+      const correctIndex = gameState.currentQuestion?.correctIndex;
+
       return (
           <div className="h-screen bg-game-dark p-4 flex flex-col">
-              <div className="flex justify-between mb-4 text-white font-mono">
-                  <span>Очки: {myPlayer?.score}</span>
-                  <span>⏳ {gameState.timeRemaining}</span>
+              <div className="flex justify-between mb-4 text-white font-mono items-center">
+                  <span className="font-bold text-lg">Очки: {myPlayer?.score}</span>
+                  {isQuestionPhase && <span className="text-2xl animate-pulse">⏳ {gameState.timeRemaining}</span>}
               </div>
-              {hasAnswered ? (
-                  <div className="flex-1 flex items-center justify-center text-white text-2xl font-bold animate-pulse">
-                      Ответ принят!
-                  </div>
-              ) : (
-                  <div className="grid grid-cols-1 gap-3 flex-1 overflow-y-auto">
-                      {gameState.currentQuestion?.options.map((opt, idx) => {
-                          const colors = ['bg-red-500', 'bg-blue-500', 'bg-yellow-500', 'bg-green-500'];
-                          return (
-                            <button
-                                key={idx}
-                                onClick={() => sendAnswer(idx)}
-                                className={`${colors[idx]} rounded-xl shadow-xl p-4 flex items-center justify-center text-xl font-bold text-white hover:opacity-90 active:scale-95 transition leading-tight min-h-[80px]`}
-                            >
-                                {opt}
-                            </button>
-                          )
-                      })}
+
+              {/* Question text is redundant on phone but helpful context, keep it small? No, instruction says see options. */}
+              
+              <div className="grid grid-cols-1 gap-3 flex-1 overflow-y-auto mb-20">
+                  {gameState.currentQuestion?.options.map((opt, idx) => {
+                      // Style determination
+                      let btnClass = "rounded-xl shadow-xl p-4 flex items-center justify-center text-lg font-bold transition-all leading-tight min-h-[80px] border-2 ";
+                      
+                      if (isQuestionPhase) {
+                          // Unified style for all options during question
+                          if (hasAnswered && myPlayer?.currentAnswer === idx) {
+                              // Highlight selected before reveal slightly
+                              btnClass += "bg-game-accent border-white text-white"; 
+                          } else {
+                              btnClass += "bg-[#0f3460] border-gray-500 text-white active:scale-95";
+                          }
+                          if (hasAnswered && myPlayer?.currentAnswer !== idx) {
+                             btnClass += " opacity-50";
+                          }
+                      } else {
+                          // Reveal phase coloring
+                          if (idx === correctIndex) {
+                              btnClass += "bg-green-600 border-green-400 text-white scale-105";
+                          } else if (myPlayer?.currentAnswer === idx && idx !== correctIndex) {
+                              btnClass += "bg-red-600 border-red-400 text-white opacity-80";
+                          } else {
+                              btnClass += "bg-[#0f3460] border-gray-600 text-white opacity-40";
+                          }
+                      }
+
+                      return (
+                        <button
+                            key={idx}
+                            onClick={() => isQuestionPhase && !hasAnswered && sendAnswer(idx)}
+                            disabled={!isQuestionPhase || hasAnswered}
+                            className={btnClass}
+                        >
+                            {opt}
+                        </button>
+                      )
+                  })}
+              </div>
+
+              {/* Continue Button (Only visible in Reveal Phase) */}
+              {!isQuestionPhase && (
+                  <div className="fixed bottom-0 left-0 w-full p-4 bg-game-dark/90 backdrop-blur border-t border-white/10">
+                      <button 
+                        onClick={sendNextStep}
+                        className="w-full py-4 bg-white text-game-dark font-black text-xl rounded-lg shadow-[0_0_15px_rgba(255,255,255,0.3)] active:scale-95 transition"
+                      >
+                          {gameState.currentQuestionIndex + 1 >= gameState.totalQuestionsInLevel ? "УРОВЕНЬ ПРОЙДЕН 🏆" : "ПРОДОЛЖИТЬ ➡️"}
+                      </button>
                   </div>
               )}
           </div>
       )
   }
 
-  if (gameState.phase === GamePhase.ANSWERS_REVEAL || gameState.phase === GamePhase.ROUND_RESULT) {
-      const wasCorrect = myPlayer?.currentAnswer === gameState.currentQuestion?.correctIndex;
+  if (gameState.phase === GamePhase.LEVEL_COMPLETE) {
       return (
-        <div className={`h-screen flex flex-col items-center justify-center p-8 text-white ${wasCorrect ? 'bg-green-600' : 'bg-red-600'}`}>
-            <div className="text-8xl mb-6">{wasCorrect ? '😎' : '😱'}</div>
-            <h2 className="text-4xl font-black mb-2">{wasCorrect ? 'КРАСАВА!' : 'МИМО!'}</h2>
-            {wasCorrect && <p className="text-xl">+15 очков</p>}
-            <div className="mt-8 p-4 bg-black/20 rounded text-center">
-                <p className="font-bold">Твой счет: {myPlayer?.score}</p>
-            </div>
+        <div className="h-screen bg-game-primary flex flex-col items-center justify-center p-8 text-center">
+            <h2 className="text-3xl font-black text-game-gold mb-4">ТАБЛИЦА ЛИДЕРОВ</h2>
+            <p className="text-white/60 mb-12">Посмотри результаты на главном экране</p>
+            
+            <button 
+                onClick={sendNextStep}
+                className="w-full py-5 bg-game-accent text-white font-black text-xl rounded-xl shadow-lg animate-pulse"
+            >
+                СЛЕДУЮЩИЙ УРОВЕНЬ 🚀
+            </button>
         </div>
       );
   }

@@ -32,8 +32,8 @@ export const generateCategories = async (level: number): Promise<string[]> => {
 export const generateQuestions = async (category: string, count: number, isBlitz: boolean = false): Promise<Question[]> => {
   try {
     const prompt = isBlitz 
-      ? `Generate ${count} random trivia questions from VARIOUS categories for a final blitz round. Language: Russian.` 
-      : `Generate ${count} trivia questions for the category: "${category}". Language: Russian.`;
+      ? `Generate ${count} completely random and distinct trivia questions from VARIOUS categories for a final blitz round. Avoid common clichés. Language: Russian.` 
+      : `Generate ${count} unique, distinct trivia questions for the category: "${category}". Avoid repetitive question patterns. Language: Russian.`;
 
     const response = await ai.models.generateContent({
       model: MODEL_NAME,

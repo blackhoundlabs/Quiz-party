@@ -9,6 +9,7 @@ const INITIAL_STATE: GameState = {
   currentLevel: 1,
   totalLevels: 4,
   currentQuestionIndex: 0,
+  totalQuestionsInLevel: 8,
   currentQuestion: null,
   availableCategories: [],
   timeRemaining: 0,
@@ -16,7 +17,7 @@ const INITIAL_STATE: GameState = {
   loadingMessage: '',
 };
 
-const QUESTION_TIME = 8; // Changed to 8 seconds as requested
+const QUESTION_TIME = 8;
 const BLITZ_QUESTION_COUNT = 12;
 const LEVEL_QUESTION_COUNT = 8;
 
@@ -29,6 +30,9 @@ export const HostScreen: React.FC = () => {
   const questionsQueueRef = useRef(questionsQueue);
   const channelRef = useRef<BroadcastChannel | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  
+  // 1. REGISTRY: Store normalized text of used questions to prevent duplicates
+  const questionHistoryRef = useRef<Set<string>>(new Set());
   
   // Keep ref in sync with state
   useEffect(() => {
@@ -87,6 +91,9 @@ export const HostScreen: React.FC = () => {
       case MessageType.REQUEST_STATE:
         broadcastState();
         break;
+      case MessageType.REQUEST_NEXT_STEP:
+        handleNextStepRequest();
+        break;
     }
   };
 
@@ -95,12 +102,10 @@ export const HostScreen: React.FC = () => {
   const addPlayer = (newPlayer: Player) => {
     setGameState(prev => {
       if (prev.players.find(p => p.id === newPlayer.id)) {
-        // If player exists, just re-broadcast to confirm join
         broadcastState(prev);
         return prev;
       }
       const updated = { ...prev, players: [...prev.players, newPlayer] };
-      // Broadcast immediately so the client gets a response fast
       broadcastState(updated);
       return updated;
     });
@@ -116,7 +121,6 @@ export const HostScreen: React.FC = () => {
   };
 
   const handleAnswerSubmit = (playerId: string, answerIndex: number) => {
-    // Validate phase using Ref to be safe, though setGameState handles it safely usually
     if (gameStateRef.current.phase !== GamePhase.QUESTION) return;
 
     setGameState(prev => {
@@ -125,6 +129,73 @@ export const HostScreen: React.FC = () => {
       );
       return { ...prev, players: updatedPlayers };
     });
+  };
+
+  const handleNextStepRequest = () => {
+      const currentPhase = gameStateRef.current.phase;
+      
+      // If showing answer explanation, move to next question OR level complete
+      if (currentPhase === GamePhase.ANSWERS_REVEAL) {
+          const currentIdx = gameStateRef.current.currentQuestionIndex;
+          const queue = questionsQueueRef.current;
+          
+          if (currentIdx + 1 >= queue.length) {
+              // End of level questions
+              setGameState(prev => ({ ...prev, phase: GamePhase.LEVEL_COMPLETE }));
+          } else {
+              // Next question
+              nextTurn();
+          }
+      }
+      // If at leaderboard (Level Complete), move to next level setup
+      else if (currentPhase === GamePhase.LEVEL_COMPLETE) {
+          handleLevelComplete();
+      }
+  };
+
+  // --- Unique Question Logic ---
+
+  /**
+   * Fetches questions from AI, filtering out duplicates found in questionHistoryRef.
+   * Retries up to 3 times if duplicates are found to ensure we get the requested count.
+   */
+  const fetchUniqueQuestions = async (category: string, totalNeeded: number, isBlitz: boolean): Promise<Question[]> => {
+    let gatheredQuestions: Question[] = [];
+    let attempts = 0;
+    const MAX_ATTEMPTS = 3;
+
+    while (gatheredQuestions.length < totalNeeded && attempts < MAX_ATTEMPTS) {
+      attempts++;
+      const neededNow = totalNeeded - gatheredQuestions.length;
+      
+      // Request slightly more than needed to increase chance of finding uniques immediately
+      // But don't request too many to avoid token limits
+      const requestCount = Math.max(neededNow, 4);
+
+      console.log(`Fetching questions attempt ${attempts}. Need: ${neededNow}, Requesting: ${requestCount}`);
+      
+      const rawQuestions = await generateQuestions(category, requestCount, isBlitz);
+      
+      const newUniqueQuestions = rawQuestions.filter(q => {
+        // 2. FILTRATION: Normalize text to lower case & trimmed for comparison
+        const key = q.text.trim().toLowerCase();
+        
+        if (questionHistoryRef.current.has(key)) {
+          console.warn("Duplicate question skipped:", q.text);
+          return false;
+        }
+        
+        // Add to registry
+        questionHistoryRef.current.add(key);
+        return true;
+      });
+
+      gatheredQuestions = [...gatheredQuestions, ...newUniqueQuestions];
+    }
+
+    // If after retries we still don't have enough, we just proceed with what we have
+    // or duplicate some from the current batch (very rare edge case)
+    return gatheredQuestions.slice(0, totalNeeded);
   };
 
   // --- Phase Management ---
@@ -137,9 +208,9 @@ export const HostScreen: React.FC = () => {
       phase: GamePhase.CATEGORY_SELECTION, 
       availableCategories: categories, 
       loading: false, 
-      timeRemaining: 10 
+      timeRemaining: 15 
     }));
-    startTimer(10, resolveCategoryVote);
+    startTimer(15, resolveCategoryVote);
   };
 
   const startTimer = (seconds: number, callback: () => void) => {
@@ -194,14 +265,25 @@ export const HostScreen: React.FC = () => {
 
     setGameState(prev => ({ ...prev, loading: true, loadingMessage: `Выбрана тема: ${winner}. Генерируем вопросы...` }));
     
-    const questions = await generateQuestions(winner, LEVEL_QUESTION_COUNT, false);
-    setQuestionsQueue(questions);
+    const count = gameStateRef.current.currentLevel === 5 ? BLITZ_QUESTION_COUNT : LEVEL_QUESTION_COUNT;
     
-    // Explicitly start the first question
-    startQuestionRound(questions[0], 0);
+    // 3. Use the new secure fetch logic instead of direct API call
+    const questions = await fetchUniqueQuestions(winner, count, gameStateRef.current.currentLevel === 5);
+    
+    // Fallback if somehow empty (network catastrophic fail)
+    if (questions.length === 0) {
+       // Should be handled by service fallback, but just in case
+       console.error("Critical: No questions generated");
+    }
+
+    setQuestionsQueue(questions);
+    setGameState(prev => ({ ...prev, totalQuestionsInLevel: questions.length })); // Update count based on actual result
+    
+    if (questions.length > 0) {
+      startQuestionRound(questions[0], 0);
+    }
   };
 
-  // Modified to accept question directly to avoid async state issues
   const startQuestionRound = (question: Question, index: number) => {
     setGameState(prev => ({
       ...prev,
@@ -217,6 +299,9 @@ export const HostScreen: React.FC = () => {
   };
 
   const revealAnswers = () => {
+    // Stop any running timers
+    if (timerRef.current) clearInterval(timerRef.current);
+
     setGameState(prev => {
         const currentQ = prev.currentQuestion;
         if (!currentQ) return prev;
@@ -224,18 +309,17 @@ export const HostScreen: React.FC = () => {
         const updatedPlayers = prev.players.map(p => {
             let turnPoints = 0;
             if (p.currentAnswer === currentQ.correctIndex) {
+                // Simple scoring: 15 points for correct
                 turnPoints = 15; 
             }
             return { ...p, score: p.score + turnPoints, roundScore: turnPoints };
         });
 
-        return { ...prev, phase: GamePhase.ANSWERS_REVEAL, players: updatedPlayers };
+        return { ...prev, phase: GamePhase.ANSWERS_REVEAL, players: updatedPlayers, timeRemaining: 0 };
     });
 
-    setTimeout(() => {
-        setGameState(prev => ({ ...prev, phase: GamePhase.ROUND_RESULT }));
-        setTimeout(nextTurn, 5000);
-    }, 4000);
+    // WE DO NOT AUTO ADVANCE HERE ANYMORE. 
+    // We wait for REQUEST_NEXT_STEP from clients.
   };
 
   const nextTurn = () => {
@@ -244,9 +328,9 @@ export const HostScreen: React.FC = () => {
     const nextIdx = currentIdx + 1;
 
     if (nextIdx >= queue.length) {
+        // Should be handled by handleNextStepRequest -> Level Complete
         setGameState(prev => ({ ...prev, phase: GamePhase.LEVEL_COMPLETE }));
     } else {
-        // Atomic update to ensure flow continues
         const nextQ = queue[nextIdx];
         startQuestionRound(nextQ, nextIdx);
     }
@@ -254,23 +338,28 @@ export const HostScreen: React.FC = () => {
 
   const handleLevelComplete = async () => {
       if (gameStateRef.current.currentLevel >= gameStateRef.current.totalLevels) {
-           // Start Blitz
-           if (gameStateRef.current.currentLevel === 5) { 
+           // If we just finished level 4, start Blitz (Level 5)
+           if (gameStateRef.current.currentLevel === 4) { 
+             setGameState(prev => ({ ...prev, currentLevel: 5, loading: true, loadingMessage: 'Финал! БЛИЦ!', phase: GamePhase.LEVEL_INTRO }));
+             // Use unique fetch for Blitz too
+             const blitzQuestions = await fetchUniqueQuestions('Mix', BLITZ_QUESTION_COUNT, true);
+             setQuestionsQueue(blitzQuestions);
+             setGameState(prev => ({ ...prev, totalQuestionsInLevel: blitzQuestions.length }));
+             if (blitzQuestions.length > 0) {
+                startQuestionRound(blitzQuestions[0], 0);
+             }
+             return;
+           }
+           // If we finished Level 5 (Blitz), End Game
+           if (gameStateRef.current.currentLevel === 5) {
                endGame();
                return;
            }
-           
-           setGameState(prev => ({ ...prev, loading: true, loadingMessage: 'Финал! БЛИЦ!', phase: GamePhase.LEVEL_INTRO }));
-           const blitzQuestions = await generateQuestions('Mix', BLITZ_QUESTION_COUNT, true);
-           setQuestionsQueue(blitzQuestions);
-           // Start Blitz logic
-           setGameState(prev => ({ ...prev, currentLevel: 5 }));
-           startQuestionRound(blitzQuestions[0], 0);
-      } else {
-          // Next Level
-          setGameState(prev => ({ ...prev, currentLevel: prev.currentLevel + 1 }));
-          startGame(); // Go back to category selection
       }
+
+      // Normal level transition
+      setGameState(prev => ({ ...prev, currentLevel: prev.currentLevel + 1 }));
+      startGame(); // Go back to category selection
   };
 
   const endGame = () => {
@@ -279,14 +368,6 @@ export const HostScreen: React.FC = () => {
         return { ...prev, phase: GamePhase.GAME_OVER, winnerId: sorted[0]?.id };
       });
   };
-
-  // Watch ONLY for phase changes to trigger Level Complete logic
-  useEffect(() => {
-      if (gameState.phase === GamePhase.LEVEL_COMPLETE) {
-          setTimeout(handleLevelComplete, 5000);
-      }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameState.phase]);
 
   // --- Renders ---
 
@@ -321,11 +402,6 @@ export const HostScreen: React.FC = () => {
               <p className="text-white/50 text-lg animate-pulse">Ожидание подключения игроков...</p>
             )}
           </div>
-        </div>
-        <div className="mt-12 flex gap-4">
-           <div className="bg-black/40 p-4 rounded text-sm max-w-md text-center">
-             <p>Для теста: Откройте эту страницу в новой вкладке и выберите "Я ИГРОК". Убедитесь, что URL в адресной строке совпадает.</p>
-           </div>
         </div>
         <button 
           onClick={startGame}
@@ -373,65 +449,94 @@ export const HostScreen: React.FC = () => {
     );
   }
 
-  if (gameState.phase === GamePhase.QUESTION || gameState.phase === GamePhase.ANSWERS_REVEAL || gameState.phase === GamePhase.ROUND_RESULT) {
+  if (gameState.phase === GamePhase.QUESTION || gameState.phase === GamePhase.ANSWERS_REVEAL) {
     const q = gameState.currentQuestion!;
-    const isRevealing = gameState.phase !== GamePhase.QUESTION;
+    const isRevealing = gameState.phase === GamePhase.ANSWERS_REVEAL;
 
     return (
       <div className="h-screen w-full flex flex-col p-8 bg-game-primary items-center">
-         <div className="w-full flex justify-between items-center mb-8">
-             <span className="text-2xl text-white/60">Уровень {gameState.currentLevel} • Вопрос {gameState.currentQuestionIndex + 1}</span>
-             <div className={`text-5xl font-black ${gameState.timeRemaining < 4 ? 'text-red-500 animate-pulse-fast' : 'text-white'}`}>
-                 {gameState.timeRemaining}
-             </div>
-         </div>
-
-         <div className="bg-white text-game-dark p-10 rounded-2xl shadow-2xl w-full max-w-5xl min-h-[200px] flex items-center justify-center mb-10 transform transition-all">
-             <h2 className="text-3xl md:text-5xl font-bold text-center leading-tight">{q.text}</h2>
-         </div>
-
-         {/* Host only shows options during REVEAL or RESULT, otherwise hides them */}
-         <div className="grid grid-cols-2 gap-6 w-full max-w-5xl flex-1">
-             {isRevealing && q.options.map((opt, idx) => {
-                 let bgClass = "bg-game-secondary border-2 border-white/10";
-                 if (idx === q.correctIndex) bgClass = "bg-green-500 border-green-300 scale-105 shadow-lg";
-                 else if (gameState.phase === GamePhase.ROUND_RESULT) bgClass = "opacity-30";
-
-                 return (
-                     <div key={idx} className={`rounded-xl p-6 flex items-center justify-center text-2xl font-bold transition-all duration-500 ${bgClass}`}>
-                         {opt}
-                         {idx === q.correctIndex && <span className="ml-4 text-3xl">✓</span>}
-                     </div>
-                 );
-             })}
-             
+         <div className="w-full flex justify-between items-center mb-4">
+             <span className="text-2xl text-white/60">Уровень {gameState.currentLevel} • Вопрос {gameState.currentQuestionIndex + 1} / {gameState.totalQuestionsInLevel}</span>
              {!isRevealing && (
-                 <div className="col-span-2 flex items-center justify-center h-full text-white/20 text-2xl animate-pulse">
-                     Смотрите варианты ответов на своих устройствах
-                 </div>
+                <div className={`text-5xl font-black ${gameState.timeRemaining < 4 ? 'text-red-500 animate-pulse-fast' : 'text-white'}`}>
+                    {gameState.timeRemaining}
+                </div>
              )}
          </div>
 
-         {gameState.phase === GamePhase.ROUND_RESULT && (
-            <div className="absolute bottom-10 w-full max-w-6xl">
-                <div className="bg-black/80 backdrop-blur p-6 rounded-t-2xl border-t border-game-accent">
-                    <h3 className="text-xl font-bold mb-4 text-game-gold">Лидеры раунда</h3>
-                    <div className="flex gap-4 overflow-x-auto pb-2">
-                        {gameState.players.sort((a,b) => b.score - a.score).map((p, i) => (
-                            <div key={p.id} className="flex-shrink-0 flex flex-col items-center w-24">
-                                <div className="w-16 h-16 rounded-full bg-gray-700 flex items-center justify-center text-2xl mb-2 border-2 border-white">
-                                    {p.avatar}
-                                </div>
-                                <span className="font-bold truncate w-full text-center text-sm">{p.name}</span>
-                                <span className="text-game-accent font-black">{p.score}</span>
-                            </div>
-                        ))}
-                    </div>
+         {/* Question Card */}
+         <div className="bg-white text-game-dark p-10 rounded-2xl shadow-2xl w-full max-w-5xl min-h-[200px] flex items-center justify-center mb-8 transform transition-all">
+             <h2 className="text-3xl md:text-5xl font-bold text-center leading-tight">{q.text}</h2>
+         </div>
+
+         {/* Host hides options during QUESTION phase now, only question shown */}
+         {!isRevealing && (
+            <div className="flex-1 flex items-center justify-center">
+                <div className="text-4xl font-bold text-white/30 animate-pulse text-center">
+                    Смотрите варианты ответов на телефоне<br/>
+                    ⏳
                 </div>
             </div>
          )}
+
+         {/* Reveal Phase: Show Answer + Fact */}
+         {isRevealing && (
+             <div className="w-full max-w-5xl flex flex-col items-center animate-fade-in">
+                 <div className="w-full p-6 bg-green-600 rounded-xl text-white text-center shadow-[0_0_30px_rgba(34,197,94,0.5)] mb-6">
+                     <span className="block text-sm opacity-70 uppercase tracking-widest mb-2">Правильный ответ</span>
+                     <h3 className="text-4xl font-black">{q.options[q.correctIndex]}</h3>
+                 </div>
+                 
+                 {q.explanation && (
+                     <div className="bg-game-secondary/80 p-6 rounded-xl border-l-4 border-game-gold w-full">
+                         <h4 className="text-game-gold font-bold text-xl mb-2">Интересный факт:</h4>
+                         <p className="text-xl leading-relaxed">{q.explanation}</p>
+                     </div>
+                 )}
+
+                 <div className="mt-8 text-white/50 animate-pulse">
+                     Ожидание подтверждения от игроков...
+                 </div>
+             </div>
+         )}
       </div>
     );
+  }
+
+  if (gameState.phase === GamePhase.LEVEL_COMPLETE) {
+      return (
+        <div className="h-screen w-full flex flex-col p-8 bg-game-primary items-center">
+            <h2 className="text-5xl font-black text-game-gold mb-8 uppercase tracking-widest">
+                Уровень {gameState.currentLevel} завершен!
+            </h2>
+            
+            <div className="w-full max-w-4xl bg-game-secondary/50 rounded-2xl p-8 border border-white/10 flex-1 overflow-hidden flex flex-col">
+                <h3 className="text-2xl font-bold mb-6 text-center">Таблица лидеров</h3>
+                <div className="overflow-y-auto flex-1 space-y-4">
+                    {gameState.players.sort((a,b) => b.score - a.score).map((p, i) => (
+                        <div key={p.id} className="flex items-center bg-game-dark p-4 rounded-xl border border-white/5">
+                            <div className="w-12 h-12 flex items-center justify-center font-black text-2xl text-white/20 mr-4">
+                                #{i + 1}
+                            </div>
+                            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-3xl shadow-lg mr-6">
+                                {p.avatar}
+                            </div>
+                            <div className="flex-1">
+                                <h4 className="text-2xl font-bold">{p.name}</h4>
+                                <div className="text-sm text-white/50">Раунд: +{p.roundScore}</div>
+                            </div>
+                            <div className="text-4xl font-black text-game-accent">
+                                {p.score}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+            <div className="mt-8 text-white/50 animate-pulse">
+                 Игроки должны нажать "Следующий уровень"...
+            </div>
+        </div>
+      );
   }
 
   if (gameState.phase === GamePhase.GAME_OVER) {
