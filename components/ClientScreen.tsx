@@ -11,10 +11,23 @@ export const ClientScreen: React.FC = () => {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
   
+  // Landscape detection
+  const [isPortrait, setIsPortrait] = useState(false);
+
   // Debug timer to show slow connection
   const [waitingTime, setWaitingTime] = useState(0);
+  
+  // UI State for Continue Button
+  const [showContinue, setShowContinue] = useState(false);
 
   useEffect(() => {
+    // Check orientation
+    const checkOrientation = () => {
+        setIsPortrait(window.innerHeight > window.innerWidth);
+    };
+    checkOrientation();
+    window.addEventListener('resize', checkOrientation);
+
     channelRef.current = new BroadcastChannel(CHANNEL_NAME);
     channelRef.current.onmessage = (event) => {
       const msg: NetworkMessage = event.data;
@@ -23,7 +36,7 @@ export const ClientScreen: React.FC = () => {
       }
     };
 
-    // Poll for state independently of joining, to check connectivity or reconnect
+    // Poll for state independently
     const interval = setInterval(() => {
         if (channelRef.current) {
             channelRef.current.postMessage({ type: MessageType.REQUEST_STATE, payload: null });
@@ -32,6 +45,7 @@ export const ClientScreen: React.FC = () => {
 
     return () => {
         clearInterval(interval);
+        window.removeEventListener('resize', checkOrientation);
         channelRef.current?.close();
     };
   }, []);
@@ -43,6 +57,22 @@ export const ClientScreen: React.FC = () => {
     }
     return () => clearInterval(timer);
   }, [connected, gameState]);
+
+  // Logic for Delayed Continue Button
+  useEffect(() => {
+      if (!gameState) return;
+      
+      if (gameState.phase === GamePhase.ANSWERS_REVEAL) {
+          setShowContinue(false);
+          const t = setTimeout(() => setShowContinue(true), 3000); // 3 seconds delay
+          return () => clearTimeout(t);
+      } else if (gameState.phase === GamePhase.QUESTION) {
+          setShowContinue(false);
+      } else {
+          // For other phases like Level Complete, show immediately
+          setShowContinue(true);
+      }
+  }, [gameState?.phase]);
 
   const joinGame = () => {
     if (!name.trim()) return;
@@ -95,6 +125,14 @@ export const ClientScreen: React.FC = () => {
       });
   };
 
+  // --- RENDERING ---
+
+  // Wrapper for Forced Landscape
+  // If portrait, we rotate 90 degrees and fix dimensions
+  const containerStyle = isPortrait 
+    ? "fixed top-1/2 left-1/2 w-[100vh] h-[100vw] -translate-x-1/2 -translate-y-1/2 rotate-90 origin-center overflow-hidden bg-game-dark text-white flex flex-col"
+    : "w-screen h-screen overflow-hidden bg-game-dark text-white flex flex-col";
+
   if (!connected) {
     return (
       <div className="min-h-screen bg-game-dark p-6 flex flex-col items-center justify-center text-white">
@@ -102,7 +140,7 @@ export const ClientScreen: React.FC = () => {
         <input
           type="text"
           placeholder="Твоё имя"
-          className="w-full p-4 rounded-lg bg-game-secondary border-2 border-game-secondary focus:border-game-accent outline-none text-center text-xl font-bold mb-6"
+          className="w-full max-w-md p-4 rounded-lg bg-game-secondary border-2 border-game-secondary focus:border-game-accent outline-none text-center text-xl font-bold mb-6"
           value={name}
           onChange={(e) => setName(e.target.value)}
           maxLength={10}
@@ -121,7 +159,7 @@ export const ClientScreen: React.FC = () => {
         <button
           onClick={joinGame}
           disabled={!name.trim()}
-          className="w-full bg-white text-game-dark font-black py-4 rounded-lg text-xl disabled:opacity-50"
+          className="w-full max-w-md bg-white text-game-dark font-black py-4 rounded-lg text-xl disabled:opacity-50"
         >
           ПОЕХАЛИ!
         </button>
@@ -131,50 +169,41 @@ export const ClientScreen: React.FC = () => {
 
   if (!gameState) {
       return (
-        <div className="h-screen flex flex-col items-center justify-center text-white bg-game-dark p-8 text-center">
+        <div className={containerStyle + " items-center justify-center p-8 text-center"}>
             <div className="animate-spin h-10 w-10 border-4 border-game-accent border-t-transparent rounded-full mb-4"></div>
             <h2 className="text-xl font-bold mb-2">Ожидание хоста...</h2>
-            <p className="text-gray-400 mb-4">Мы пытаемся подключиться к главной игре.</p>
             
             {waitingTime > 5 && (
-                <div className="bg-red-900/50 p-4 rounded border border-red-500 text-sm">
-                    <p className="font-bold">Не подключается?</p>
-                    <p>1. Убедитесь, что вкладка "ХОСТ" открыта и активна.</p>
-                    <p>2. Проверьте, что этот сайт открыт по ТОМУ ЖЕ адресу (URL), что и хост.</p>
+                <div className="bg-red-900/50 p-4 rounded border border-red-500 text-sm mt-4">
+                    <p>Проверьте, что вкладка ХОСТ открыта.</p>
                 </div>
             )}
-            
-            <button onClick={() => window.location.reload()} className="mt-8 text-sm text-game-accent underline">
-                Перезагрузить
-            </button>
         </div>
       );
   }
 
   const myPlayer = gameState.players.find(p => p.id === playerId);
 
-  // --- Phase Renders ---
-
   if (gameState.phase === GamePhase.LOBBY) {
     return (
-        <div className="h-screen bg-game-secondary flex flex-col items-center justify-center text-white p-8">
+        <div className={containerStyle + " items-center justify-center p-8"}>
             <div className="text-6xl mb-4 animate-bounce">{myPlayer?.avatar || selectedAvatar}</div>
             <h2 className="text-2xl font-bold">Привет, {myPlayer?.name || name}!</h2>
-            <p className="mt-4 opacity-70 text-center">Смотри на главный экран.</p>
+            <p className="mt-4 opacity-70 text-center">Ждем начала игры...</p>
         </div>
     );
   }
 
   if (gameState.phase === GamePhase.CATEGORY_SELECTION) {
       return (
-          <div className="h-screen bg-game-dark p-4 flex flex-col">
+          <div className={containerStyle + " p-4"}>
               <h2 className="text-center text-game-gold font-bold text-xl mb-4">Голосуй за тему!</h2>
-              <div className="grid grid-cols-1 gap-4 flex-1">
+              <div className="grid grid-cols-2 gap-4 flex-1">
                   {gameState.availableCategories.map((cat) => (
                       <button
                         key={cat}
                         onClick={() => sendVote(cat)}
-                        className={`p-4 rounded-xl font-bold text-lg shadow-lg transition-all ${myPlayer?.selectedCategory === cat ? 'bg-game-accent text-white scale-105 border-2 border-white' : 'bg-white text-game-dark'}`}
+                        className={`p-4 rounded-xl font-bold text-lg shadow-lg transition-all ${myPlayer?.selectedCategory === cat ? 'bg-game-accent text-white scale-105 border-4 border-white' : 'bg-white text-game-dark'}`}
                       >
                           {cat}
                       </button>
@@ -184,53 +213,52 @@ export const ClientScreen: React.FC = () => {
       )
   }
 
-  // Merged Question and Reveal logic for easier button rendering
   if (gameState.phase === GamePhase.QUESTION || gameState.phase === GamePhase.ANSWERS_REVEAL) {
       const isQuestionPhase = gameState.phase === GamePhase.QUESTION;
-      const hasAnswered = myPlayer?.currentAnswer !== undefined;
       const correctIndex = gameState.currentQuestion?.correctIndex;
+      const myAnswer = myPlayer?.currentAnswer;
 
       return (
-          <div className="h-screen bg-game-dark p-4 flex flex-col">
-              <div className="flex justify-between mb-4 text-white font-mono items-center">
+          <div className={containerStyle + " p-4"}>
+              <div className="flex justify-between mb-2 text-white font-mono items-center shrink-0">
                   <span className="font-bold text-lg">Очки: {myPlayer?.score}</span>
                   {isQuestionPhase && <span className="text-2xl animate-pulse">⏳ {gameState.timeRemaining}</span>}
               </div>
 
-              {/* Question text is redundant on phone but helpful context, keep it small? No, instruction says see options. */}
-              
-              <div className="grid grid-cols-1 gap-3 flex-1 overflow-y-auto mb-20">
+              {/* Answers Grid: 2x2 */}
+              <div className="grid grid-cols-2 gap-4 flex-1 mb-20 md:mb-0">
                   {gameState.currentQuestion?.options.map((opt, idx) => {
-                      // Style determination
-                      let btnClass = "rounded-xl shadow-xl p-4 flex items-center justify-center text-lg font-bold transition-all leading-tight min-h-[80px] border-2 ";
+                      let btnClass = "rounded-xl shadow-xl p-4 flex items-center justify-center text-lg md:text-2xl font-bold transition-all leading-tight border-4 ";
                       
                       if (isQuestionPhase) {
-                          // Unified style for all options during question
-                          if (hasAnswered && myPlayer?.currentAnswer === idx) {
-                              // Highlight selected before reveal slightly
-                              btnClass += "bg-game-accent border-white text-white"; 
+                          // --- Question Phase Styling ---
+                          if (myAnswer === idx) {
+                              // Chosen Answer: Highlighted Blue + White/Gold Border
+                              btnClass += "bg-[#3b82f6] border-white text-white scale-105"; 
                           } else {
-                              btnClass += "bg-[#0f3460] border-gray-500 text-white active:scale-95";
-                          }
-                          if (hasAnswered && myPlayer?.currentAnswer !== idx) {
-                             btnClass += " opacity-50";
+                              // Default: Dark Blue + Gray Border
+                              btnClass += "bg-[#16213e] border-[#303a55] text-white active:scale-95 hover:bg-[#1f2e52]";
                           }
                       } else {
-                          // Reveal phase coloring
+                          // --- Reveal Phase Styling ---
                           if (idx === correctIndex) {
-                              btnClass += "bg-green-600 border-green-400 text-white scale-105";
-                          } else if (myPlayer?.currentAnswer === idx && idx !== correctIndex) {
-                              btnClass += "bg-red-600 border-red-400 text-white opacity-80";
+                              // Correct Answer: Green
+                              btnClass += "bg-green-600 border-green-400 text-white scale-105 shadow-[0_0_20px_rgba(34,197,94,0.6)]";
+                          } else if (myAnswer === idx && idx !== correctIndex) {
+                              // Wrongly Chosen: Red
+                              btnClass += "bg-red-600 border-red-400 text-white opacity-100";
                           } else {
-                              btnClass += "bg-[#0f3460] border-gray-600 text-white opacity-40";
+                              // Others: Faded
+                              btnClass += "bg-[#16213e] border-[#303a55] text-white/30 grayscale";
                           }
                       }
 
                       return (
                         <button
                             key={idx}
-                            onClick={() => isQuestionPhase && !hasAnswered && sendAnswer(idx)}
-                            disabled={!isQuestionPhase || hasAnswered}
+                            // ALLOW changing answer by not checking `myAnswer !== undefined` here
+                            onClick={() => isQuestionPhase && sendAnswer(idx)}
+                            disabled={!isQuestionPhase}
                             className={btnClass}
                         >
                             {opt}
@@ -239,14 +267,14 @@ export const ClientScreen: React.FC = () => {
                   })}
               </div>
 
-              {/* Continue Button (Only visible in Reveal Phase) */}
-              {!isQuestionPhase && (
-                  <div className="fixed bottom-0 left-0 w-full p-4 bg-game-dark/90 backdrop-blur border-t border-white/10">
+              {/* Continue Button (Only visible in Reveal Phase after delay) */}
+              {!isQuestionPhase && showContinue && (
+                  <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-3/4 max-w-md z-50">
                       <button 
                         onClick={sendNextStep}
-                        className="w-full py-4 bg-white text-game-dark font-black text-xl rounded-lg shadow-[0_0_15px_rgba(255,255,255,0.3)] active:scale-95 transition"
+                        className="w-full py-4 bg-white text-game-dark font-black text-xl rounded-full shadow-[0_0_20px_rgba(255,255,255,0.5)] active:scale-95 transition hover:bg-gray-200"
                       >
-                          {gameState.currentQuestionIndex + 1 >= gameState.totalQuestionsInLevel ? "УРОВЕНЬ ПРОЙДЕН 🏆" : "ПРОДОЛЖИТЬ ➡️"}
+                          {gameState.currentQuestionIndex + 1 >= gameState.totalQuestionsInLevel ? "УРОВЕНЬ ПРОЙДЕН 🏆" : "СЛЕДУЮЩИЙ ХОД ➡️"}
                       </button>
                   </div>
               )}
@@ -256,16 +284,18 @@ export const ClientScreen: React.FC = () => {
 
   if (gameState.phase === GamePhase.LEVEL_COMPLETE) {
       return (
-        <div className="h-screen bg-game-primary flex flex-col items-center justify-center p-8 text-center">
+        <div className={containerStyle + " items-center justify-center p-8 text-center"}>
             <h2 className="text-3xl font-black text-game-gold mb-4">ТАБЛИЦА ЛИДЕРОВ</h2>
-            <p className="text-white/60 mb-12">Посмотри результаты на главном экране</p>
+            <p className="text-white/60 mb-8">Посмотри результаты на главном экране</p>
             
-            <button 
-                onClick={sendNextStep}
-                className="w-full py-5 bg-game-accent text-white font-black text-xl rounded-xl shadow-lg animate-pulse"
-            >
-                СЛЕДУЮЩИЙ УРОВЕНЬ 🚀
-            </button>
+            {showContinue && (
+                <button 
+                    onClick={sendNextStep}
+                    className="w-3/4 max-w-md py-5 bg-game-accent text-white font-black text-xl rounded-xl shadow-lg animate-pulse"
+                >
+                    СЛЕДУЮЩИЙ УРОВЕНЬ 🚀
+                </button>
+            )}
         </div>
       );
   }

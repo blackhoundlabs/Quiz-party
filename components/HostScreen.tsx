@@ -20,6 +20,7 @@ const INITIAL_STATE: GameState = {
 const QUESTION_TIME = 8;
 const BLITZ_QUESTION_COUNT = 12;
 const LEVEL_QUESTION_COUNT = 8;
+const MAX_PLAYERS = 4;
 
 export const HostScreen: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
@@ -101,10 +102,21 @@ export const HostScreen: React.FC = () => {
 
   const addPlayer = (newPlayer: Player) => {
     setGameState(prev => {
+      // Allow reconnecting with same ID
       if (prev.players.find(p => p.id === newPlayer.id)) {
         broadcastState(prev);
         return prev;
       }
+      
+      // Check Max Players Limit
+      if (prev.players.length >= MAX_PLAYERS) {
+          console.warn("Lobby is full, rejecting player", newPlayer.name);
+          // Ideally send an error message back, but for now we just don't add them.
+          // Broadcast current state so they at least receive something (though client might stick on loading)
+          broadcastState(prev);
+          return prev;
+      }
+
       const updated = { ...prev, players: [...prev.players, newPlayer] };
       broadcastState(updated);
       return updated;
@@ -388,7 +400,7 @@ export const HostScreen: React.FC = () => {
           NEURAL QUIZ
         </h1>
         <div className="p-8 bg-game-secondary/50 backdrop-blur-md rounded-xl border border-white/10 shadow-2xl w-2/3 max-w-4xl">
-          <h2 className="text-2xl text-center mb-6 font-bold">Игроки в лобби: {gameState.players.length}</h2>
+          <h2 className="text-2xl text-center mb-6 font-bold">Игроки в лобби: {gameState.players.length} / {MAX_PLAYERS}</h2>
           <div className="flex flex-wrap gap-6 justify-center min-h-[200px]">
             {gameState.players.map(p => (
               <div key={p.id} className="flex flex-col items-center animate-bounce-short">
