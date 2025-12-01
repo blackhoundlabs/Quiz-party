@@ -19,8 +19,6 @@ export enum MessageType {
   REQUEST_NEXT_STEP = 'REQUEST_NEXT_STEP',
 }
 
-export const CHANNEL_NAME = 'neural_quiz_party_v1';
-
 export interface Player {
   id: string;
   name: string;
@@ -41,6 +39,7 @@ export interface Question {
 }
 
 export interface GameState {
+  roomCode: string; // The 4-letter code for joining
   phase: GamePhase;
   players: Player[];
   currentLevel: number;
@@ -55,7 +54,7 @@ export interface GameState {
   loadingMessage: string;
 }
 
-// For BroadcastChannel communication
+// For PeerJS communication
 export interface NetworkMessage {
   type: MessageType;
   payload: any;

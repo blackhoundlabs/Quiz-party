@@ -1,53 +1,34 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { GamePhase, GameState, MessageType, NetworkMessage, Player, CHANNEL_NAME } from '../types';
+import { GamePhase, GameState, MessageType, NetworkMessage, Player } from '../types';
 
 const AVATARS = ['🐶', '🐱', '🦊', '🦁', '🐯', '🦄', '🐸', '🦉', '🤖', '👽'];
 
+declare const Peer: any;
+
 export const ClientScreen: React.FC = () => {
   const [connected, setConnected] = useState(false);
+  const [roomCode, setRoomCode] = useState('');
   const [name, setName] = useState('');
   const [selectedAvatar, setSelectedAvatar] = useState(AVATARS[0]);
   const [playerId, setPlayerId] = useState('');
   const [gameState, setGameState] = useState<GameState | null>(null);
-  const channelRef = useRef<BroadcastChannel | null>(null);
   
-  // Landscape detection
+  // PeerJS Refs
+  const peerRef = useRef<any>(null);
+  const connRef = useRef<any>(null);
+  
   const [isPortrait, setIsPortrait] = useState(false);
-
-  // Debug timer to show slow connection
   const [waitingTime, setWaitingTime] = useState(0);
-  
-  // UI State for Continue Button
   const [showContinue, setShowContinue] = useState(false);
+  const [connectionError, setConnectionError] = useState('');
 
   useEffect(() => {
-    // Check orientation
     const checkOrientation = () => {
         setIsPortrait(window.innerHeight > window.innerWidth);
     };
     checkOrientation();
     window.addEventListener('resize', checkOrientation);
-
-    channelRef.current = new BroadcastChannel(CHANNEL_NAME);
-    channelRef.current.onmessage = (event) => {
-      const msg: NetworkMessage = event.data;
-      if (msg.type === MessageType.STATE_UPDATE) {
-        setGameState(msg.payload);
-      }
-    };
-
-    // Poll for state independently
-    const interval = setInterval(() => {
-        if (channelRef.current) {
-            channelRef.current.postMessage({ type: MessageType.REQUEST_STATE, payload: null });
-        }
-    }, 2000);
-
-    return () => {
-        clearInterval(interval);
-        window.removeEventListener('resize', checkOrientation);
-        channelRef.current?.close();
-    };
+    return () => window.removeEventListener('resize', checkOrientation);
   }, []);
 
   useEffect(() => {
@@ -58,51 +39,95 @@ export const ClientScreen: React.FC = () => {
     return () => clearInterval(timer);
   }, [connected, gameState]);
 
-  // Logic for Delayed Continue Button
   useEffect(() => {
       if (!gameState) return;
-      
       if (gameState.phase === GamePhase.ANSWERS_REVEAL) {
           setShowContinue(false);
-          const t = setTimeout(() => setShowContinue(true), 3000); // 3 seconds delay
+          const t = setTimeout(() => setShowContinue(true), 3000);
           return () => clearTimeout(t);
       } else if (gameState.phase === GamePhase.QUESTION) {
           setShowContinue(false);
       } else {
-          // For other phases like Level Complete, show immediately
           setShowContinue(true);
       }
   }, [gameState?.phase]);
 
   const joinGame = () => {
-    if (!name.trim()) return;
+    const cleanCode = roomCode.trim().toUpperCase();
+    if (!name.trim() || cleanCode.length !== 4) return;
+    setConnectionError('');
+    
     const id = Math.random().toString(36).substr(2, 9);
     setPlayerId(id);
-    const newPlayer: Player = {
-      id,
-      name,
-      avatar: selectedAvatar,
-      score: 0,
-      lastActionTime: 0,
-      roundScore: 0
-    };
     
-    if (channelRef.current) {
-      channelRef.current.postMessage({
-        type: MessageType.JOIN,
-        payload: newPlayer
-      });
-      // Also request state immediately
-      channelRef.current.postMessage({
-        type: MessageType.REQUEST_STATE,
-        payload: null
-      });
-    }
-    setConnected(true);
+    // Initialize PeerJS
+    const peer = new Peer();
+    peerRef.current = peer;
+
+    peer.on('open', () => {
+        console.log("Client Peer ID:", peer.id);
+        const hostPeerId = `nqp-game-${cleanCode}`;
+        console.log("Connecting to Host:", hostPeerId);
+
+        const conn = peer.connect(hostPeerId);
+        
+        conn.on('open', () => {
+            console.log("Connected to Host!");
+            connRef.current = conn;
+            setConnected(true);
+            setConnectionError('');
+            
+            const newPlayer: Player = {
+              id,
+              name,
+              avatar: selectedAvatar,
+              score: 0,
+              lastActionTime: 0,
+              roundScore: 0
+            };
+
+            conn.send({
+                type: MessageType.JOIN,
+                payload: newPlayer
+            });
+        });
+
+        conn.on('data', (msg: NetworkMessage) => {
+             if (msg.type === MessageType.STATE_UPDATE) {
+                 setGameState(msg.payload);
+             }
+        });
+
+        conn.on('close', () => {
+            alert("Соединение с хостом потеряно!");
+            window.location.reload();
+        });
+
+        conn.on('error', (err: any) => {
+            console.error("Connection Error", err);
+            setConnectionError("Ошибка подключения. Проверьте код.");
+        });
+        
+        // Timeout check if connection fails silently
+        setTimeout(() => {
+            if (!conn.open) {
+                setConnectionError("Не удалось найти комнату. Проверьте код и интернет.");
+            }
+        }, 5000);
+    });
+
+    peer.on('error', (err: any) => {
+        console.error("Peer Error", err);
+        if (err.type === 'peer-unavailable') {
+             setConnectionError(`Комната ${cleanCode} не найдена. Хост онлайн?`);
+        } else {
+             setConnectionError("Ошибка сети. Попробуйте снова.");
+        }
+    });
   };
 
   const sendVote = (category: string) => {
-    channelRef.current?.postMessage({
+    connRef.current?.send({
         type: MessageType.VOTE_CATEGORY,
         payload: { category },
         senderId: playerId
@@ -110,7 +135,7 @@ export const ClientScreen: React.FC = () => {
   };
 
   const sendAnswer = (index: number) => {
-    channelRef.current?.postMessage({
+    connRef.current?.send({
         type: MessageType.SUBMIT_ANSWER,
         payload: { answerIndex: index },
         senderId: playerId
@@ -118,7 +143,7 @@ export const ClientScreen: React.FC = () => {
   };
 
   const sendNextStep = () => {
-      channelRef.current?.postMessage({
+      connRef.current?.send({
           type: MessageType.REQUEST_NEXT_STEP,
           payload: {},
           senderId: playerId
@@ -127,8 +152,6 @@ export const ClientScreen: React.FC = () => {
 
   // --- RENDERING ---
 
-  // Wrapper for Forced Landscape
-  // If portrait, we rotate 90 degrees and fix dimensions
   const containerStyle = isPortrait 
     ? "fixed top-1/2 left-1/2 w-[100vh] h-[100vw] -translate-x-1/2 -translate-y-1/2 rotate-90 origin-center overflow-hidden bg-game-dark text-white flex flex-col"
     : "w-screen h-screen overflow-hidden bg-game-dark text-white flex flex-col";
@@ -137,14 +160,33 @@ export const ClientScreen: React.FC = () => {
     return (
       <div className="min-h-screen bg-game-dark p-6 flex flex-col items-center justify-center text-white">
         <h1 className="text-3xl font-black text-game-accent mb-8">JOIN GAME</h1>
-        <input
-          type="text"
-          placeholder="Твоё имя"
-          className="w-full max-w-md p-4 rounded-lg bg-game-secondary border-2 border-game-secondary focus:border-game-accent outline-none text-center text-xl font-bold mb-6"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          maxLength={10}
-        />
+        
+        <div className="w-full max-w-md space-y-4 mb-6">
+            <div>
+                <label className="block text-sm text-gray-400 mb-1">Код комнаты (с экрана Хоста)</label>
+                <input
+                  type="text"
+                  placeholder="ABCD"
+                  className="w-full p-4 rounded-lg bg-game-secondary border-2 border-game-secondary focus:border-game-gold outline-none text-center text-3xl font-mono uppercase font-bold tracking-widest"
+                  value={roomCode}
+                  onChange={(e) => setRoomCode(e.target.value.toUpperCase().replace(/\s/g, ''))}
+                  maxLength={4}
+                />
+            </div>
+            
+            <div>
+                 <label className="block text-sm text-gray-400 mb-1">Твое имя</label>
+                 <input
+                  type="text"
+                  placeholder="Имя"
+                  className="w-full p-4 rounded-lg bg-game-secondary border-2 border-game-secondary focus:border-game-accent outline-none text-center text-xl font-bold"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  maxLength={10}
+                />
+            </div>
+        </div>
+
         <div className="grid grid-cols-5 gap-2 mb-8">
           {AVATARS.map(av => (
             <button
@@ -156,9 +198,16 @@ export const ClientScreen: React.FC = () => {
             </button>
           ))}
         </div>
+        
+        {connectionError && (
+            <div className="bg-red-900/50 border border-red-500 text-red-100 p-4 rounded-lg mb-4 text-center animate-pulse">
+                <p className="font-bold">{connectionError}</p>
+            </div>
+        )}
+
         <button
           onClick={joinGame}
-          disabled={!name.trim()}
+          disabled={!name.trim() || roomCode.length !== 4}
           className="w-full max-w-md bg-white text-game-dark font-black py-4 rounded-lg text-xl disabled:opacity-50"
         >
           ПОЕХАЛИ!
@@ -171,11 +220,10 @@ export const ClientScreen: React.FC = () => {
       return (
         <div className={containerStyle + " items-center justify-center p-8 text-center"}>
             <div className="animate-spin h-10 w-10 border-4 border-game-accent border-t-transparent rounded-full mb-4"></div>
-            <h2 className="text-xl font-bold mb-2">Ожидание хоста...</h2>
-            
+            <h2 className="text-xl font-bold mb-2">Подключение...</h2>
             {waitingTime > 5 && (
-                <div className="bg-red-900/50 p-4 rounded border border-red-500 text-sm mt-4">
-                    <p>Проверьте, что вкладка ХОСТ открыта.</p>
+                <div className="bg-yellow-900/50 p-4 rounded border border-yellow-500 text-sm mt-4">
+                    <p>Долгое подключение... Проверьте интернет.</p>
                 </div>
             )}
         </div>
@@ -189,7 +237,7 @@ export const ClientScreen: React.FC = () => {
         <div className={containerStyle + " items-center justify-center p-8"}>
             <div className="text-6xl mb-4 animate-bounce">{myPlayer?.avatar || selectedAvatar}</div>
             <h2 className="text-2xl font-bold">Привет, {myPlayer?.name || name}!</h2>
-            <p className="mt-4 opacity-70 text-center">Ждем начала игры...</p>
+            <p className="mt-4 opacity-70 text-center">Ты в игре! Ждем начала.</p>
         </div>
     );
   }
@@ -225,30 +273,22 @@ export const ClientScreen: React.FC = () => {
                   {isQuestionPhase && <span className="text-2xl animate-pulse">⏳ {gameState.timeRemaining}</span>}
               </div>
 
-              {/* Answers Grid: 2x2 */}
               <div className="grid grid-cols-2 gap-4 flex-1 mb-20 md:mb-0">
                   {gameState.currentQuestion?.options.map((opt, idx) => {
                       let btnClass = "rounded-xl shadow-xl p-4 flex items-center justify-center text-lg md:text-2xl font-bold transition-all leading-tight border-4 ";
                       
                       if (isQuestionPhase) {
-                          // --- Question Phase Styling ---
                           if (myAnswer === idx) {
-                              // Chosen Answer: Highlighted Blue + White/Gold Border
                               btnClass += "bg-[#3b82f6] border-white text-white scale-105"; 
                           } else {
-                              // Default: Dark Blue + Gray Border
                               btnClass += "bg-[#16213e] border-[#303a55] text-white active:scale-95 hover:bg-[#1f2e52]";
                           }
                       } else {
-                          // --- Reveal Phase Styling ---
                           if (idx === correctIndex) {
-                              // Correct Answer: Green
                               btnClass += "bg-green-600 border-green-400 text-white scale-105 shadow-[0_0_20px_rgba(34,197,94,0.6)]";
                           } else if (myAnswer === idx && idx !== correctIndex) {
-                              // Wrongly Chosen: Red
                               btnClass += "bg-red-600 border-red-400 text-white opacity-100";
                           } else {
-                              // Others: Faded
                               btnClass += "bg-[#16213e] border-[#303a55] text-white/30 grayscale";
                           }
                       }
@@ -256,7 +296,6 @@ export const ClientScreen: React.FC = () => {
                       return (
                         <button
                             key={idx}
-                            // ALLOW changing answer by not checking `myAnswer !== undefined` here
                             onClick={() => isQuestionPhase && sendAnswer(idx)}
                             disabled={!isQuestionPhase}
                             className={btnClass}
@@ -267,7 +306,6 @@ export const ClientScreen: React.FC = () => {
                   })}
               </div>
 
-              {/* Continue Button (Only visible in Reveal Phase after delay) */}
               {!isQuestionPhase && showContinue && (
                   <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-3/4 max-w-md z-50">
                       <button 
